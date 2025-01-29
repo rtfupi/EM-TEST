@@ -1,0 +1,882 @@
+#!/bin/sh
+## SPDX-License-Identifier: GPL-2.0-only
+##.###########################################################################.
+##| Copyright (C) Eugene V. Markov 2024
+##|
+##! \file    em-git-init
+##! \author  Eugene V. Markov <upirtf@gmail.com>
+##! \version 0.2
+##! \date    2024-07-19 16:24:33 +05:00
+##|
+##! \brief   The script creates a new git repository with a mirror on github.
+##|
+##! \copyright GNU General Public License v2.
+##|
+##'###########################################################################'
+
+SN=$(basename $0)
+EM_SN=$(basename $(realpath "${0}"))
+EM_DN=$(dirname $0)
+
+EM_VERSION=0.2
+
+## 8< DEBUG 8< @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@.
+#EM_DEBUG_OTPUT="/tmp/${EM_SN}.debug"
+#export EM_DEBUG_OTPUT
+
+if [ -n "${EM_DEBUG_OTPUT}" ];then
+    # Для переключения stdout и stderr всех команд на файл 'EM_DEBUG_OTPUT'
+     exec >> "${EM_DEBUG_OTPUT}" 2>&1
+fi
+
+#function EM_D { return; }
+function EM_D(){ echo "${@}"; }
+[ "$(sh -c 'echo -n ${EM_DEBUG_OTPUT}')" ] && export -f EM_D
+
+
+EM_RAND="$(cat /dev/urandom | tr -dc '0-9' | fold -w 5 | head -n 1)"
+EM_DATE="$(date "+%Y-%m-%d %H:%M:%S") ${EM_RAND}"
+EM_D ""
+EM_D "${EM_RAND}.================="
+EM_D "${EM_RAND}| ${EM_DATE}"
+EM_D "${EM_RAND}| ${EM_DN}/${SN}"
+EM_D "${EM_RAND}| ${EM_SN}"
+EM_D "${EM_RAND}'================="
+
+## >8 DEBUG >8 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@'
+
+
+##.~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~.
+##| Управление локалью справки (--help). Нужно help2man.
+##|
+##'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
+#EM_HLP_L_EXP <- exported variable
+EM_HLP_L=C
+[ -n "${EM_HLP_L_EXP}" ] && EM_HLP_L=${EM_HLP_L_EXP}
+
+
+
+##.~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~.
+##| Проверка наличия команд в системе.
+##|
+##'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
+EM_CHECK_CMD="realpath readlink git"
+EM_CHECK_NF=
+for cmd in ${EM_CHECK_CMD};do
+    if [ ! -x "$(command -v "$cmd")" ] > /dev/null 2>&1; then
+        cmd=$(printf "*** Error: %s: command not found." "${cmd}")
+        logger -p local2.info -t ${SN} "${cmd}"; echo "${cmd}" >&2
+        EM_CHECK_NF=yes
+    fi
+done
+[ y${EM_CHECK_NF} = yyes ] && exit 1
+
+
+
+##.%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%.
+##| Local library
+##|
+##'%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%'
+
+##.===========================================================================.
+##! \brief Проверка наличия значения у опции вида '-o val' коммандной строки.
+##! \param 
+##!  $1 - тестируемая опция;
+##! \return
+##!  1 - следующий аргумент не имеет '-' в начале;
+##!  2 - следующий аргумент начинается с '-' или отсутствует.
+##'==========================================================================='
+em_fn_test_arg_p () {
+    if [ -z "$1" ]; then return 1; fi
+    case "$1" in -*) return 2 ;; esac
+    return 0
+}
+
+
+##.===========================================================================.
+##! \brief Options error.
+##! \param 
+##!  $1 - option;
+ ##'=========================================================================='
+em_fn_options_error () {
+    ERROR_OPTION=yes;ERROR_OPTION_LST="${ERROR_OPTION_LST} $1"
+}
+
+
+##.===========================================================================.
+##! \brief Модуль обработки опций вида {-o|--opt val}.
+##! \param $1 - option;
+##! \param $2 - value.
+##! \return
+##!  0 - ok;
+##!  1 - option error.
+##'==========================================================================='
+em_fn_opt_module () {
+    case "${1}" in
+        -M|--email)
+            em_fn_test_arg_p "$2"
+            case "${?}" in
+                0) EM_USER_EMAIL="${2}";EM_USER_EMAIL_LOCAL=yes;;
+                *) em_fn_options_error "${2}";  return 1;;
+            esac
+            ;;
+        -U|--user-name)
+            em_fn_test_arg_p "$2"
+            case "${?}" in
+                0) EM_USER_NAME="${2}";EM_USER_NAME_LOCAL=yes;;
+                *) em_fn_options_error "${2}";  return 1;;
+            esac
+            ;;
+        --templates-dir)
+            em_fn_test_arg_p "$2"
+            case "${?}" in
+                0) EM_GIT_SKEL_BASE_DIR="${2}";;
+                *) em_fn_options_error "${2}";  return 1;;
+            esac
+            ;;
+    esac
+    return 0
+}
+
+##.===========================================================================.
+##! \brief Модуль обработки опций вида {-o|--opt}.
+##! \param $1 - option;
+##! \return
+##!  0 - ok;
+##!  1 - option error.
+##'==========================================================================='
+em_fn_opt_module2 () {
+    case "${1}" in
+        -V|--version) VER_MESS=yes;;
+        --help) HELP_MESS=yes;;
+        -h) HELP_MESS_SHORT=yes;;
+        --no-log) EM_E=;;
+    esac
+    return 0
+}
+
+
+##.===========================================================================.
+##! \brief Сообщение об ошибке.
+##'==========================================================================='
+em_fn_error_too_many_args () {
+    echo "***Error: arg: ${EM_CN_ARGS} : too many arguments."
+    return 0
+}
+
+
+##.===========================================================================.
+##! \brief Short information about arguments.
+##|
+##'==========================================================================='
+help_message_short ()
+{
+    local usage options fl
+
+    while IFS= read -r line; do
+
+        if [ y${usage} != yyes ];then
+            echo "${line}"|sed -n 's/^\(Usage\|Использование\):.*$/\0/gp;tx;q100;:x'
+            if [ ${?} -eq 0 ];then
+                usage=yes
+            else
+                continue
+            fi
+        elif [ y${options} != yyes ];then
+            echo "${line}"| \
+                sed 's/^\(Options\|Параметры\):.*$/\0/g;tx;q100;:x'
+            if [ ${?} -eq 0 ];then
+                options=yes
+            fi
+        else
+            echo "${line}"|sed -n 's/^.\+$/\0/gp;tx;q100;:x'
+            [ ${?} -eq 100 ] && break
+        fi
+    done
+}
+
+
+##.===========================================================================.
+##! \brief Information about arguments.
+##|
+##'==========================================================================='
+help_message ()
+{
+    case "${EM_HLP_L}" in
+        ru_RU.UTF-8)
+            cat << EOF
+Скрипт создает новый рабочий репозиторий git и, если задана опция --template,
+применяет шаблон из каталога ~/.config/em-new-git-repo/templates к рабочему
+каталогу. Затем, если опция -B|--bare задана, скрипт создает локальный origin
+bare репозиторий для рабочего git-репозитория. Затем, если задан github URL,
+то на github.com создается зеркало локального origin bare репозитория.
+
+Последовательность действий:
+
+Опционально. Создать новый репозиторий на github.com. Во избежание ошибок
+не создаваите в новом репозиторий файлы README, лицензии и gitignore.
+
+Запустить скрипт из каталога, в котором нужно создать новый рабочий
+репозиторий git. Применение опций командной строки описано в примерах.
+
+Использование: ${EM_SN} {--help|-h}|{--version|-V}
+   или: ${EM_SN} [-T|--template NAME [--template-dir DIR]] [-B|--bare] [--no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+   или: ${EM_SN}_bare_tgpl2 [--template-dir DIR] [--no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+   или: ${EM_SN}_bare [--template-dir DIR] [--no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+   или: ${EM_SN}_tgpl2 [--template-dir DIR] [--no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+   или: ${EM_SN}_bare_tgpl2 [--template-dir DIR] [--no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+
+Параметры:
+  -T,--template NAME     имя каталога шаблона.
+  --template-dir DIR     путь до каталога шаблона.
+  -B,--bare              не создавать bare репозиторий.
+  --no-log               запретить логирование операций.
+  -U,--user-name NAME    имя пользователя git.
+  -M,--user-email EMAIL  email пользователя git.
+  -V,--version           вывести версию и завершить рабту скрипта.
+  -h                     вывести короткую справку и завершить рабту скрипта.
+  --help                 вывести справку и завершить рабту скрипта.
+
+Скрипт обрабатывает softlink-и на себя:
+
+ '${EM_SN}_bare PRJ_NAME GITHUB_URL' тоже самое, что
+ '${EM_SN} -B PRJ_NAME GITHUB_URL'
+
+ '${EM_SN}_tgpl2 ' тоже самое, что
+ '${EM_SN} -T shell-gpl2.0 -n PNAME -G URL'
+
+ '${EM_SN}_bare_tgpl2 PRJ_NAME GITHUB_URL' тоже самое, что
+ '${EM_SN} -B -T shell-gpl2.0 PRJ_NAME GITHUB_URL'
+
+Примеры:
+Создать рабочий git репозиторий, не применять шаблон к рабочему каталогу
+проекта, не создавать локальнй bare репозиторий и зеркало на github:
+
+ ${EM_SN} TEST
+
+Создать рабочий git репозиторий, не применять шаблон шаблона к рабочему
+каталогу проекта, создавать локальнй origin bare репозиторий без зеркала
+не github:
+
+ ${EM_SN} -B TEST
+
+ ${EM_SN}_bare TEST
+
+Создать рабочий git репозиторий, применить шаблон к рабочему каталогу
+проекта, создать локальнй origin bare репозиторий без зеркала на github: 
+
+ ${EM_SN} -T shell-gpl2.0 TEST
+
+ ${EM_SN}_tgpl2 TEST
+
+Создать рабочий git репозиторий, применить шаблон к рабочему каталогу
+проекта, создать локальнй origin bare репозиторий, не создавать зеркало
+на github:
+
+ ${EM_SN} -B -T shell-gpl2.0 TEST
+
+ ${EM_SN}_bare_tgpl2 TEST
+
+Создать рабочий git репозиторий, не применять шаблон к рабочему каталогу
+проекта, не создавать локальнй bare репозиторий, создать origin репозиторий
+на github:
+
+ ${EM_SN} TEST git@github.com:name/TEST.git
+
+Создать рабочий git репозиторий, не применять шаблон к рабочему каталогу
+проекта, создать локальнй origin bare репозиторий и зеркало на github:
+
+ ${EM_SN} -B TEST git@github.com:name/TEST.git
+
+ ${EM_SN}_bare TEST git@github.com:name/TEST.git
+
+Создать рабочий git репозиторий, применить шаблон к рабочему каталогу
+проекта, создать origin репозиторий на github:
+
+ ${EM_SN} -T shell-gpl2.0 TEST git@github.com:name/TEST.git
+
+ ${EM_SN}_tgpl2 TEST git@github.com:name/TEST.git
+
+Создать рабочий git репозиторий, применить шаблон к рабочему каталогу
+проекта, создать локальнй bare репозиторий и зеркало на github:
+
+ ${EM_SN} -B -T shell-gpl2.0 TEST git@github.com:name/TEST.git
+
+ ${EM_SN}_bare_tgpl2 TEST git@github.com:name/TEST.git
+
+
+Файлы:
+
+ Каталог шаблонов по умолчанию:
+
+ ~/.config/em-new-git/templates
+EOF
+            ;;
+        C|POSIX)
+            cat << EOF
+The script creates a new git repository with a mirror on github.
+
+Usage: ${EM_SN} {--help|-h}|{--version|-V}
+   or: ${EM_SN} [-T|--template NAME [--template-dir DIR]] [-B|--bare] [-no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+   or: ${EM_SN}_bare [--template-dir DIR] [-no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+   or: ${EM_SN}_tgpl2 [--template-dir DIR] [-no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+   or: ${EM_SN}_bare_tgpl2 [--template-dir DIR] [-no-log] [-U|--user-name NAME] [-M|--user-email EMAIL] PRJ_NAME [GITHUB_URL]
+
+Options:
+  -T,--template NAME     name of the project template.
+  --template-dir DIR     path to the template directory.
+  -B,--bare              do not create a bare repository.
+     --no-log            prohibit logging of operations. 
+  -U,--user-name NAME    set the user name.
+  -M,--user-email EMAIL  set the user email.
+  -V,--version           version info.
+  -h                     short help info.
+  --help                 help info.
+
+
+Examples:
+
+Create working git repository without applying a template to the
+project working directory, without local bare repository and
+github mirror:
+
+ ${EM_SN} TEST
+
+Create working git repository without applying a template to the
+project working directory and create origin local bare git repositores
+without github mirror:
+
+ ${EM_SN} -B  TEST
+
+ ${EM_SN}_bare TEST
+
+Create working git repository with applying a template to the
+project working directory, without local bare repository and github mirror:
+
+ ${EM_SN} -T shell-gpl2.0 TEST
+
+ ${EM_SN}_tgpl2 TEST
+
+Create working repositores with applying a template to the project working
+directory directory and create origin local bare git repository without
+github mirror:
+
+ ${EM_SN} -B -T shell-gpl2.0 TEST
+
+ ${EM_SN}_bare_tgpl2 TEST
+
+Create working git repository without applying a template to the
+project working directory, with origin repository on githab:
+
+ ${EM_SN} TEST git@github.com:name/TEST.git
+
+Create working git repository without applying a template to the project
+working directory and create origin local bare git repository with github
+mirror:
+
+ ${EM_SN} -B TEST git@github.com:name/TEST.git
+
+ ${EM_SN}_bare TEST git@github.com:name/TEST.git
+
+Create working git repository with applying a template to the project
+working directory, with origin repository on githab:
+
+ ${EM_SN} -T shell-gpl2.0 TEST git@github.com:name/TEST.git
+
+ ${EM_SN}_tgpl2 TEST git@github.com:name/TEST.git
+
+Create working git repository with applying a template to the project
+working directory and create origin local bare git repository with github
+mirror:
+
+ ${EM_SN} -B -T shell-gpl2.0  TEST git@github.com:name/TEST.git
+
+ ${EM_SN}_bare_tgpl2 TEST git@github.com:name/TEST.git
+
+Files:
+
+The name of the template is the name of the directory in which it is
+located.
+
+Default template directory:
+
+  ~/.config/em-new-git-repo/templates
+EOF
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+
+##.===========================================================================.
+##! \brief Information about version.
+##|
+##'==========================================================================='
+version_message ()
+{
+    cat << EOF
+${SN} v${EM_VERSION}
+
+Copyright (c) Eugene V. Markov 2024
+License GPLv2: GNU GPL version 2
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+EOF
+    return 0
+}
+
+
+
+##.===========================================================================.
+##! \brief Execution with logging.
+##|
+##'==========================================================================='
+em_eval ()
+{
+    local cmd=${1}
+    local topt="-t"
+    local str s lopt
+
+    let "lopt=${#} - 1"
+    if [ ${lopt} != 0 ];then lopt="-l${lopt}"; else lopt=; fi
+
+    echo -n -e "\n#:> "|tee -a "${EM_LOG_PATH}"
+    case ${cmd} in
+        echo) echo "echo ..."|tee -a "${EM_LOG_PATH}";topt=;;
+        cd)
+            cd "${2}"
+            echo "cd '${2}'"|tee -a "${EM_LOG_PATH}"
+            echo "pwd: $(pwd)"|tee -a "${EM_LOG_PATH}"
+            return
+            ;;
+    esac
+
+    shift
+    # set -x
+    for el in "${@}";do
+        echo -e -n "${el}\x0"
+    done|xargs ${topt} -0 ${lopt} ${cmd} 2>&1 |tee -a "${EM_LOG_PATH}"
+    # set +x
+}
+export -f em_eval
+
+
+
+##.%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%.
+##| Main part.
+##|
+##'%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%'
+
+EM_E=em_eval
+
+EM_CR_GH_MIRROR=
+EM_CR_GH_ORIGIN=
+EM_CR_LOCAL_ORIGIN=
+
+HELP_MESS=
+HELP_MESS_SHORT=
+VER_MESS=
+ERROR_OPTION=
+ERROR_OPTION_LST=
+
+EM_GITHUB=
+
+EM_TIMESTAMP="$(date "+%Y%m%d%H%M%S")"
+
+EM_LOG_PATH=
+
+# Path to script configuration directory
+EM_CONF_DIR="${HOME}/.config/${EM_SN}"
+# Path to script configuration file
+EM_CONF="${EM_CONF_DIR}/default.conf"
+
+# Project name.
+EM_PRJ_NAME=
+EM_PRJ_PNAME_W=
+
+# Path to template directory
+EM_GIT_SKEL_BASE_DIR="${HOME}/.config/em-new-git/templates"
+EM_GIT_SKEL_NAME= #"github-gpl2.0-shell"
+EM_GIT_SKEL_DIR= #"${EM_GIT_SKEL_BASE_DIR}/${EM_GIT_SKEL_NAME}"
+
+EM_CURR_DIR="$(pwd)"
+# Path to the project directory
+EM_PRJ_DIR= #"${EM_CURR_DIR}/${EM_PRJ_NAME}"
+# Path to the git working directory
+EM_WORK_DIR= #"${EM_PRJ_DIR}/${EM_PRJ_NAME_W}"
+# Path to the bare git repository
+EM_BARE_DIR= #"${EM_PRJ_DIR}/${EM_PRJ_NAME}.git"
+
+EM_BARE_REPO=no
+EM_USER_NAME=
+EM_USER_NAME_LOCAL=
+EM_USER_EMAIL=
+EM_USER_EMAIL_LOCAL=
+
+EM_CN_ARGS=1
+
+##.===========================================================================.
+##! \brief Разбор неопциональных аргументов командной строки (двух).
+##! \param
+##!  $1 - имя переменной первого неопционального аргумента;
+##!  $2 - имя переменной второго неопционального аргумента;
+##!  $3 - значение аргумента;
+##! \return
+##!  0 - следующий аргумент не имеет '-' в начале;
+##!  1 - следующий аргумент начинается с '-' или отсутствует.
+##'==========================================================================='
+em_fn_no_opt_args () {
+
+    case "${EM_CN_ARGS}" in
+        1) EM_CN_ARGS=2; printf -v "${1}" %s "${3}";;
+        2) EM_CN_ARGS=3; printf -v "${2}" %s "${3}";;
+        *) EM_CN_ARGS="${3}";return 1;;
+    esac
+    return 0
+}
+
+
+
+case "${SN}" in
+    em-git-init_*)
+        EM_D ">>>>>*"
+
+        while [ -n "$1" ]
+        do
+            case "$1" in
+                -V|--version|--help|-h|--no-log)
+                    em_fn_opt_module2 "${1}"
+                    ;;
+                -M|--email|-U|--user-name|--templates-dir)
+                    em_fn_opt_module "${1}" "${2}" 
+                    [ ${?} == 1 ] && break
+                    shift
+                    ;;
+                -*) em_fn_options_error "${1}";break;;
+                *)
+                    em_fn_no_opt_args EM_PRJ_NAME EM_GITHUB "${1}"
+                    [ ${?} == 1 ] && em_fn_error_too_many_args && exit 1
+                    ;;
+            esac
+            shift
+        done
+
+
+        echo "${SN}"|sed '/_tgpl2/!{q100}' 2>&1 > /dev/null \
+            && EM_GIT_SKEL_NAME="shell-gpl2.0"
+        echo "${SN}"|sed '/_bare/!{q100}' 2>&1 > /dev/null \
+            && EM_BARE_REPO=yes
+        echo "${SN}"|sed '/_ru/!{q100}' 2>&1 > /dev/null \
+            && EM_HLP_L=ru_RU.UTF-8
+        ;;
+    *)
+        # общий случай ($0 - em-git-init)
+
+        EM_D ">>>>>**"
+
+        while [ -n "$1" ]
+        do
+            case "$1" in
+
+                --create-github-origin) EM_CR_GH_ORIGIN=yes;;
+                --create-github-mirror) EM_BARE_REPO=yes;;
+                --create-local-origin) EM_CR_LOCAL_ORIGIN=yes;;
+
+                -V|--version|--help|-h|--no-log)
+                    em_fn_opt_module2 "${1}"
+                    ;;
+                -B|--bare) EM_BARE_REPO=yes;;
+                -T|--templates-name)
+                    em_fn_test_arg_p "$2"
+                    case "${?}" in
+                        0) shift;EM_GIT_SKEL_NAME="${1}";;
+                        *) em_fn_options_error "${1}";break;;
+                    esac
+                    ;;
+                -M|--email|-U|--user-name|--templates-dir)
+                    em_fn_opt_module "${1}" "${2}" 
+                    [ ${?} == 1 ] && break
+                    shift
+                    ;;
+                -*) em_fn_options_error "${1}";break;;
+                *)
+                    em_fn_no_opt_args EM_PRJ_NAME EM_GITHUB "${1}"
+                    [ ${?} == 1 ] && em_fn_error_too_many_args && exit 1
+                    ;;
+            esac
+            shift
+        done
+        ;;
+
+esac
+
+
+
+## 8< DEBUG 8< @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@.
+# EM_D ">>>>> = >${}<"
+EM_D ">>>>> EM_PRJ_NAME=          >${EM_PRJ_NAME}<"
+EM_D ">>>>> EM_GITHUB=            >${EM_GITHUB}<"
+EM_D ">>>>> EM_GIT_SKEL_NAME=     >${EM_GIT_SKEL_NAME}<"
+EM_D ">>>>> EM_GIT_SKEL_BASE_DIR= >${EM_GIT_SKEL_BASE_DIR}<"
+EM_D ">>>>> EM_BARE_REPO=         >${EM_BARE_REPO}<"
+EM_D ">>>>> EM_USER_NAME=         >${EM_USER_NAME}<"
+EM_D ">>>>> EM_USER_NAME_LOCAL=   >${EM_USER_NAME_LOCAL}<"
+EM_D ">>>>> EM_USER_EMAIL=        >${EM_USER_EMAIL}<"
+EM_D ">>>>> EM_USER_EMAIL_LOCAL=  >${EM_USER_EMAIL_LOCAL}<"
+EM_D ">>>>> EM_CR_GH_ORIGIN=      >${EM_CR_GH_ORIGIN}<"
+EM_D ">>>>> EM_CR_GH_MIRROR=      >${EM_CR_GH_MIRROR}<"
+EM_D ">>>>> EM_CR_LOCAL_ORIGIN=   >${EM_CR_LOCAL_ORIGIN}<"
+EM_D ">>>>> EM_WORK_DIR=          >${EM_WORK_DIR}<"
+EM_D ">>>>> EM_BARE_DIR=          >${EM_BARE_DIR}<"
+## >8 DEBUG >8 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@'
+
+
+if [ -n "${ERROR_OPTION}" ]; then
+    echo "***Error: ${ERROR_OPTION_LST}: no such options."
+    exit 1
+fi
+
+
+if [ -n "$HELP_MESS" ]; then help_message; exit 0; fi
+if [ -n "$VER_MESS" ]; then version_message; exit 0; fi
+if [ -n "$HELP_MESS_SHORT" ]; then help_message|help_message_short; exit 0; fi
+
+
+#.~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~.
+#| Проверка аргументов.
+#'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
+
+if [ -z "${EM_PRJ_NAME}" ];then
+    echo "***Error: : missing project name."
+    exit 1
+fi
+
+if [ -z "${EM_USER_NAME}" ];then
+    EM_USER_NAME="$(git config user.name)"
+    if [ -z "${EM_USER_NAME}" ];then
+        echo "***Error: : missing user name."
+        exit 1
+    fi
+fi
+
+if [ -z "${EM_USER_EMAIL}" ];then
+    EM_USER_EMAIL="$(git config user.email)"
+    if [ -z "${EM_USER_EMAIL}" ];then
+        echo "***Error: : missing user email."
+        exit 1
+    fi
+fi
+
+
+#.~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~.
+#| Настройка переменных окружения.
+#'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
+
+# каталог проекта
+EM_PRJ_DIR="${EM_CURR_DIR}/${EM_PRJ_NAME}"
+
+# путь к логфайлу
+if [ -n "${EM_E}" ];then
+    EM_LOG_PATH="${EM_CURR_DIR}/${SN}.${EM_TIMESTAMP}.log"
+    EM_LOG_PATH="$(readlink -f "${EM_LOG_PATH}")"
+    :> "${EM_LOG_PATH}"
+fi
+
+
+ # для шаблонных скриптов.
+export EM_PRJ_NAME
+export EM_TIMESTAMP
+export EM_USER_NAME
+export EM_USER_EMAIL
+export EM_SCRIPT_NAME=${SN}
+
+export EM_LOG_PATH
+
+
+## 8< DEBUG 8< @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@.
+# EM_D ">>>>> = >${}<"
+EM_D ">>>>> EM_PRJ_DIR=           >${EM_PRJ_DIR}<"
+EM_D ">>>>> EM_BARE_DIR=          >${EM_BARE_DIR}<"
+EM_D ">>>>> EM_LOG_PATH=          >${EM_LOG_PATH}<"
+## >8 DEBUG >8 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@'
+
+
+exit
+
+
+#.~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~.
+#| --create-local-origin
+#'~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~'
+if [ y${EM_CR_LOCAL_ORIGIN} == yyes ];then
+    if [ -d "${EM_PRJ_DIR}/${EM_PRJ_NAME}.git" ];then
+        echo "***Error: ${EM_PRJ_NAME}/${EM_PRJ_NAME}.git: this directory already exists."
+        exit 1
+    fi
+    ${EM_E} mv "${EM_PRJ_DIR}" "${EM_PRJ_DIR}.${EM_TIMESTAMP}"
+    ${EM_E} mkdir -p "${EM_PRJ_DIR}"
+    ${EM_E} mv "${EM_PRJ_DIR}.${EM_TIMESTAMP}" "${EM_PRJ_DIR}/${EM_PRJ_NAME}"
+    ${EM_E} mv "${EM_LOG_PATH}" "${EM_PRJ_DIR}"
+
+fi
+        
+exit
+
+
+
+
+
+
+
+EM_PRJ_NAME_W="${EM_PRJ_NAME}"
+if [ n${EM_BARE_REPO} == nno ];then
+    EM_WORK_DIR="${EM_PRJ_DIR}"
+else
+    EM_WORK_DIR="${EM_PRJ_DIR}/${EM_PRJ_NAME_W}"
+    EM_BARE_DIR="${EM_PRJ_DIR}/${EM_PRJ_NAME}.git"
+fi
+
+
+
+if [ -d "${EM_PRJ_DIR}" ];then
+    echo "***Error: ${EM_PRJ_NAME}: this project directory already exists."
+    exit 1
+else
+    mkdir -p "${EM_PRJ_DIR}"
+    if [ ${?} -ne 0 ];then
+        echo "***Error: ${EM_PRJ_NAME}: unable to create project directory."
+        exit 1
+    fi
+fi
+
+
+if [ -n "${EM_E}" ];then
+    EM_LOG_PATH="${EM_PRJ_NAME}/${SN}.log"
+    EM_LOG_PATH="$(readlink -f "${EM_LOG_PATH}")"
+    :> "${EM_LOG_PATH}"
+fi
+
+
+exit
+
+
+${EM_E} mkdir -p "${EM_WORK_DIR}"
+
+
+EM_GIT_SKEL_DIR="${EM_GIT_SKEL_BASE_DIR}/${EM_GIT_SKEL_NAME}"
+if [ -z "${EM_GIT_SKEL_NAME}" ];then
+    ${EM_E} echo "*** Warning: : Project template name is not specified."
+    EM_GIT_SKEL_DIR=
+elif [ ! -d "${EM_GIT_SKEL_DIR}" ];then
+    ${EM_E} echo "*** Error: ${EM_GIT_SKEL_DIR}: no such directory."
+    exit 1
+fi
+
+if [ -n "${EM_GIT_SKEL_DIR}" ];then
+    ${EM_E} echo \
+            "*** Info: : copy template files to directory ${EM_WORK_DIR}."
+    ${EM_E} cp -r "${EM_GIT_SKEL_DIR}/." "${EM_WORK_DIR}/"
+else
+    ${EM_E} echo \
+            "*** Info: : create .gitignore file in the directory ${EM_WORK_DIR}."
+    ${EM_E} touch "${EM_WORK_DIR}/.gitignore"
+    cat > "${EM_WORK_DIR}/.gitignore" << EOF
+*~
+.ATTIC
+${SN}.log
+EOF
+fi
+
+
+exit
+
+
+export EM_PRJ_NAME
+export EM_TIMESTAMP
+export EM_USER_NAME
+export EM_USER_EMAIL
+export EM_SCRIPT_NAME=${SN}
+
+
+# if [ y${EM_CR_LOCAL_ORIGIN} == yyes ]; then
+#     if [ -d "${EM_WORK_DIR}" ]
+
+
+# Create a working git repository.
+
+(
+    ${EM_E} echo "*** Info: : create a working git repository."
+    ${EM_E} cd "${EM_WORK_DIR}"
+    if [ -n "${EM_GIT_SKEL_DIR}" ];then
+        if [ -e ./.pre.sh ];then
+            ${EM_E} echo \
+                    "*** Info: : apply project template to catalog ${EM_WORK_DIR}."
+            ${EM_E} ./.pre.sh
+            ${EM_E} rm ./.pre.sh
+        fi
+    fi
+    ${EM_E} git init
+    [ y${EM_USER_NAME_LOCAL} = yyes ] \
+        && ${EM_E} git config --local user.name "${EM_USER_NAME}"
+    [ y${EM_USER_EMAIL_LOCAL} = yyes ] \
+        && ${EM_E} git config --local user.email "${EM_USER_EMAIL}"
+        ${EM_E} git add .
+        ${EM_E} git commit -m "My first backup"
+)
+
+
+# Create a new repository on GitHub.com. To avoid errors, do not initialize the
+# new repository with README, license, or gitignore files.
+
+if [ y${EM_BARE_REPO} == yyes ];then
+    (
+        ${EM_E} echo "*** Info: : create bare git repository."
+        ${EM_E} cd "${EM_PRJ_DIR}"
+        ${EM_E} git clone --bare "${EM_PRJ_NAME}"
+        # ${EM_E} cd "${EM_PRJ_NAME}.git"
+        # ${EM_E} git init --bare --shared
+        ${EM_E} cd "${EM_WORK_DIR}"
+        ${EM_E} git remote add origin \
+                "$(realpath -s --relative-to="${EM_WORK_DIR}" "${EM_BARE_DIR}")"
+        ${EM_E} git pull origin main
+        ${EM_E} git branch --set-upstream-to=origin/main main
+        ${EM_E} cd "${EM_BARE_DIR}"
+        ${EM_E} git remote remove origin
+        if [ -n "${EM_GITHUB}" ];then
+            ${EM_E} echo "*** Info: : there is a github repository."
+            ${EM_E} git remote add github "${EM_GITHUB}"
+            ${EM_E} git push -u --mirror github
+        fi
+    )
+elif [ -n "${EM_GITHUB}" ];then
+    (
+        ${EM_E} echo "*** Info: : do not need a bare git repository."
+        ${EM_E} echo "*** Info: : there is a github repository."
+        ${EM_E} cd "${EM_WORK_DIR}"
+        ${EM_E} git remote add origin "${EM_GITHUB}"
+        ${EM_E} git branch -M main
+        ${EM_E} git push -u origin main
+    )
+fi
+
+exit
+
+# 8< DEBUG 8<
+
+# ./em-new-git-repo -n qwerty -T "shell-gpl2.0"
+# ./em-new-git-repo  -n EM_QWERTY -T "shell-gpl2.0" -G git@github.com:rtfupi/EM_QWERTY.git
+# oracle-jdk-bin-1.8.0.261.1
+
+# em-git-init_ TEST
+# em-git-init_ TEST git@github.com:rtfupi/TEST.git
+# em-git-init_bare TEST
+# em-git-init_tgpl2 TEST
+# em-git-init_bare_tgpl2 TEST
+# em-git-init_bare TEST
+# em-git-init_tgpl2 TEST git@github.com:rtfupi/TEST.git
+# em-git-init_bare_tgpl2 TEST git@github.com:rtfupi/TEST.git
+# em-git-init_bare_tgpl2 -U mark -M mark@mail TEST git@github.com:rtfupi/TEST.git
+
+# >8 DEBUG >8
